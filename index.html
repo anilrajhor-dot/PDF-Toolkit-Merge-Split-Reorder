@@ -22,4 +22,125 @@
     .workspace { margin:2rem; display:grid; grid-template-columns:repeat(auto-fill,minmax(160px,1fr)); gap:1rem; }
     .thumbnail { background:#fff; border-radius:12px; box-shadow:0 2px 6px rgba(0,0,0,0.1); padding:0.5rem; text-align:center; }
     .thumbnail canvas { max-width:100%; border-radius:8px; }
-    .toast { position:fixed; bottom:1rem; right:1rem; background:#0
+    .toolbar { display:flex; flex-wrap:wrap; gap:0.5rem; margin:1rem; }
+    .toolbar button { background:#F5B301; border:none; border-radius:8px; padding:0.6rem 1rem; cursor:pointer; }
+    .toolbar button.destructive { background:#E2582B; color:#fff; }
+    .toast { position:fixed; bottom:1rem; right:1rem; background:#0E0E10; color:#fff; padding:0.8rem 1rem; border-radius:8px; opacity:0; transition:opacity 0.3s; }
+    .toast.show { opacity:1; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>PDF Toolkit</h1>
+    <div class="badge">🔒 Your files never leave your computer</div>
+  </header>
+
+  <div class="upload-zone" id="uploadZone">
+    <p>Drag & Drop PDFs or Images here</p>
+    <input type="file" id="fileInput" multiple accept=".pdf,.png,.jpg,.jpeg">
+    <br><br>
+    <button onclick="document.getElementById('fileInput').click()">Browse Files</button>
+  </div>
+
+  <div class="toolbar">
+    <button onclick="mergeAll()">Merge All</button>
+    <button onclick="resetApp()" class="destructive">Reset</button>
+  </div>
+
+  <div class="workspace" id="workspace"></div>
+  <div class="toast" id="toast"></div>
+
+<script>
+// pdf.js worker
+pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.worker.min.js";
+
+const uploadZone=document.getElementById('uploadZone');
+const fileInput=document.getElementById('fileInput');
+const workspace=document.getElementById('workspace');
+const toast=document.getElementById('toast');
+let pages=[];
+
+function showToast(msg){toast.textContent=msg;toast.classList.add('show');setTimeout(()=>toast.classList.remove('show'),3000);}
+
+uploadZone.addEventListener('dragover',e=>{e.preventDefault();uploadZone.classList.add('dragover');});
+uploadZone.addEventListener('dragleave',()=>uploadZone.classList.remove('dragover'));
+uploadZone.addEventListener('drop',e=>{e.preventDefault();uploadZone.classList.remove('dragover');handleFiles(e.dataTransfer.files);});
+fileInput.addEventListener('change',e=>handleFiles(e.target.files));
+
+async function handleFiles(files){
+  for(let file of files){
+    const type=file.type.toLowerCase();
+    if(type.includes("pdf")){
+      try{
+        await loadPDF(file);
+      }catch(err){
+        if(err.name==="PasswordException"){
+          const pwd=prompt("This PDF is password-protected. Enter password:");
+          if(pwd){await loadPDF(file,pwd);} else {showToast("Password required to open this PDF");}
+        } else {showToast("Error reading PDF: "+err.message);}
+      }
+    } else if(type.startsWith("image/")){
+      const reader=new FileReader();
+      reader.onload=e=>{
+        const img=new Image();
+        img.onload=()=>{
+          const canvas=document.createElement('canvas');
+          const ctx=canvas.getContext('2d');
+          canvas.width=img.width; canvas.height=img.height;
+          ctx.drawImage(img,0,0);
+          const thumb=document.createElement('div');
+          thumb.className='thumbnail';
+          thumb.appendChild(canvas);
+          workspace.appendChild(thumb);
+          pages.push({canvas,filename:file.name});
+        };
+        img.src=e.target.result;
+      };
+      reader.readAsDataURL(file);
+    } else {showToast("Unsupported file type: "+file.name);}
+  }
+}
+
+async function loadPDF(file,password){
+  const arrayBuffer=await file.arrayBuffer();
+  const pdf=await pdfjsLib.getDocument({data:arrayBuffer,password}).promise;
+  for(let i=1;i<=pdf.numPages;i++){
+    const page=await pdf.getPage(i);
+    const viewport=page.getViewport({scale:1});
+    const canvas=document.createElement('canvas');
+    const ctx=canvas.getContext('2d');
+    canvas.width=viewport.width; canvas.height=viewport.height;
+    await page.render({canvasContext:ctx,viewport}).promise;
+    const thumb=document.createElement('div');
+    thumb.className='thumbnail';
+    thumb.appendChild(canvas);
+    workspace.appendChild(thumb);
+    pages.push({canvas,pageIndex:i,filename:file.name});
+  }
+  showToast(`Loaded PDF: ${file.name} (${pdf.numPages} pages)`);
+}
+
+function mergeAll(){
+  if(pages.length===0){showToast("No pages to merge");return;}
+  (async()=>{
+    const pdfDoc=await PDFLib.PDFDocument.create();
+    for(let p of pages){
+      const imgBytes=p.canvas.toDataURL("image/png");
+      const pngImage=await pdfDoc.embedPng(imgBytes);
+      const page=pdfDoc.addPage([p.canvas.width,p.canvas.height]);
+      page.drawImage(pngImage,{x:0,y:0,width:p.canvas.width,height:p.canvas.height});
+    }
+    const pdfBytes=await pdfDoc.save();
+    const blob=new Blob([pdfBytes],{type:"application/pdf"});
+    const a=document.createElement("a");
+    a.href=URL.createObjectURL(blob);
+    a.download="merged-document.pdf";
+    a.click();
+    showToast("Merged PDF downloaded");
+  })();
+}
+
+function resetApp(){workspace.innerHTML="";pages=[];showToast("Workspace cleared");}
+</script>
+</body>
+</html>
