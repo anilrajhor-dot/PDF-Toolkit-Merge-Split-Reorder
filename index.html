@@ -11,6 +11,20 @@
   <!-- Libraries -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+
+  <!-- Simple translation API (LibreTranslate demo) -->
+  <script>
+    async function translateText(text, targetLang) {
+      const res = await fetch("https://translate.argosopentech.com/translate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ q: text, source: "auto", target: targetLang })
+      });
+      const data = await res.json();
+      return data.translatedText;
+    }
+  </script>
 
   <style>
     body { font-family:'Inter',sans-serif; background:#F4EDE2; margin:0; color:#0E0E10; }
@@ -21,6 +35,11 @@
     .workspace { margin:2rem; display:grid; grid-template-columns:repeat(auto-fill,minmax(160px,1fr)); gap:1rem; }
     .thumbnail { background:#fff; border-radius:12px; box-shadow:0 2px 6px rgba(0,0,0,0.1); padding:0.5rem; text-align:center; }
     .thumbnail canvas { max-width:100%; border-radius:8px; }
+    .toolbar { display:flex; flex-wrap:wrap; gap:0.5rem; margin:1rem; }
+    .toolbar button { background:#F5B301; border:none; border-radius:8px; padding:0.6rem 1rem; cursor:pointer; }
+    .toolbar button.destructive { background:#E2582B; color:#fff; }
+    textarea { width:100%; height:150px; margin:1rem; border-radius:8px; border:1px solid #ccc; padding:0.5rem; font-family:monospace; }
+    select { margin:0.5rem; }
     .toast { position:fixed; bottom:1rem; right:1rem; background:#0E0E10; color:#fff; padding:0.8rem 1rem; border-radius:8px; opacity:0; transition:opacity 0.3s; }
     .toast.show { opacity:1; }
   </style>
@@ -36,7 +55,28 @@
     <input type="file" id="fileInput" multiple accept=".pdf,.png,.jpg,.jpeg">
   </div>
 
+  <div class="toolbar">
+    <button onclick="mergeAll()">Merge All</button>
+    <button onclick="extractSelected()">Extract Selected</button>
+    <button onclick="deleteSelected()" class="destructive">Delete Selected</button>
+    <button onclick="rotateSelected()">Rotate Selected</button>
+    <button onclick="resetApp()" class="destructive">Reset</button>
+  </div>
+
   <div class="workspace" id="workspace"></div>
+
+  <h3 style="margin-left:1rem;">Extracted Text</h3>
+  <textarea id="extractedText"></textarea>
+  <h3 style="margin-left:1rem;">Translate To:</h3>
+  <select id="translateSelect">
+    <option value="hi">Hindi</option>
+    <option value="fr">French</option>
+    <option value="es">Spanish</option>
+    <option value="de">German</option>
+  </select>
+  <button onclick="doTranslate()">Translate</button>
+  <textarea id="translatedText"></textarea>
+
   <div class="toast" id="toast"></div>
 
 <script>
@@ -44,3 +84,103 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs
 
 const uploadZone=document.getElementById('uploadZone');
 const fileInput=document.getElementById('fileInput');
+const workspace=document.getElementById('workspace');
+const toast=document.getElementById('toast');
+const extractedText=document.getElementById('extractedText');
+const translatedText=document.getElementById('translatedText');
+let pages=[];
+
+function showToast(msg){toast.textContent=msg;toast.classList.add('show');setTimeout(()=>toast.classList.remove('show'),3000);}
+
+uploadZone.addEventListener('dragover',e=>{e.preventDefault();});
+uploadZone.addEventListener('drop',e=>{e.preventDefault();handleFiles(e.dataTransfer.files);});
+fileInput.addEventListener('change',e=>handleFiles(e.target.files));
+
+async function handleFiles(files){
+  for(let file of files){
+    const type=file.type.toLowerCase();
+    if(type.includes("pdf")){
+      try{await loadPDF(file);}catch(err){
+        if(err.name==="PasswordException"){
+          const pwd=prompt("This PDF is password-protected. Enter password:");
+          if(pwd){await loadPDF(file,pwd);} else {showToast("Password required");}
+        } else {showToast("Error: "+err.message);}
+      }
+    } else if(type.startsWith("image/")){
+      const reader=new FileReader();
+      reader.onload=e=>{
+        const img=new Image();
+        img.onload=()=>{
+          const canvas=document.createElement('canvas');
+          const ctx=canvas.getContext('2d');
+          canvas.width=img.width; canvas.height=img.height;
+          ctx.drawImage(img,0,0);
+          addThumbnail(canvas,file.name);
+        };
+        img.src=e.target.result;
+      };
+      reader.readAsDataURL(file);
+    }
+  }
+}
+
+async function loadPDF(file,password){
+  const arrayBuffer=await file.arrayBuffer();
+  const pdf=await pdfjsLib.getDocument({data:arrayBuffer,password}).promise;
+  for(let i=1;i<=pdf.numPages;i++){
+    const page=await pdf.getPage(i);
+    const viewport=page.getViewport({scale:1});
+    const canvas=document.createElement('canvas');
+    const ctx=canvas.getContext('2d');
+    canvas.width=viewport.width; canvas.height=viewport.height;
+    await page.render({canvasContext:ctx,viewport}).promise;
+    addThumbnail(canvas,file.name+"_page"+i);
+  }
+  showToast(`Loaded PDF: ${file.name}`);
+}
+
+function addThumbnail(canvas,label){
+  const thumb=document.createElement('div');
+  thumb.className='thumbnail';
+  const checkbox=document.createElement('input');
+  checkbox.type="checkbox";
+  thumb.appendChild(checkbox);
+  thumb.appendChild(canvas);
+  workspace.appendChild(thumb);
+  pages.push({canvas,label,checkbox});
+}
+
+function mergeAll(){
+  if(pages.length===0){showToast("No pages to merge");return;}
+  (async()=>{
+    const pdfDoc=await PDFLib.PDFDocument.create();
+    for(let p of pages){
+      const imgBytes=p.canvas.toDataURL("image/png");
+      const pngImage=await pdfDoc.embedPng(imgBytes);
+      const page=pdfDoc.addPage([p.canvas.width,p.canvas.height]);
+      page.drawImage(pngImage,{x:0,y:0,width:p.canvas.width,height:p.canvas.height});
+    }
+    const pdfBytes=await pdfDoc.save();
+    downloadBlob(pdfBytes,"merged-document.pdf");
+    showToast("Merged PDF downloaded");
+  })();
+}
+
+function extractSelected(){
+  extractedText.value="";
+  (async()=>{
+    for(let p of pages){
+      if(p.checkbox.checked){
+        const worker=await Tesseract.createWorker("eng");
+        const {data:{text}}=await worker.recognize(p.canvas);
+        extractedText.value+=`\n--- ${p.label} ---\n${text}\n`;
+        await worker.terminate();
+      }
+    }
+    showToast("Text extracted from selected pages");
+  })();
+}
+
+function deleteSelected(){
+  pages=pages.filter(p=>{
+    if(p.checkbox.checked){workspace.removeChild(p.canvas.parentElement);
